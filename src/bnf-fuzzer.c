@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <assert.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
@@ -51,6 +52,7 @@ char *cli_str_error(int32_t);
 #define ERR_INVALID_TOKEN_TYPE_IN_RULE 109
 #define ERR_INVALID_RULE_DEFINITION    110
 #define ERR_TOO_MANY_RULES_IN_FILE     111
+#define ERR_BNF_IS_RECURSIVE           112
 
 int32_t arena_new(arena_t *arena, size_t capacity);
 void arena_free(arena_t *arena);
@@ -128,6 +130,8 @@ typedef struct {
 int32_t parser_new_parser(parser_t *parser, lexer_t lexer, arena_t *arena);
 int32_t parser_parse(parser_t *parser, grammar_rules_list_t *out);
 
+uint8_t all_rules_lead_to_atoms(grammar_rules_list_t *rules);
+
 int main(int argc, const char **argv)
 {
 	command_t cmd = {0};
@@ -195,11 +199,18 @@ int32_t cli_run(command_t *cmd)
 		return err_code;
 	}
 
+	// TODO: Think if hashmap would be better, we are going to iterate over this quite a lot
+	//       but tbh I am not implementing a hashmap now.
 	grammar_rules_list_t grammar_rules = {0};
 
 	if ((err_code = parser_parse(&parser, &grammar_rules)) != 0)
 	{
 		return err_code;
+	}
+
+	if (!all_rules_lead_to_atoms(&grammar_rules))
+	{
+		return ERR_BNF_IS_RECURSIVE;
 	}
 
 	print_grammar_rules_list(&grammar_rules);
@@ -287,6 +298,10 @@ char *cli_str_error(int32_t err_code)
 	case ERR_TOO_MANY_RULES_IN_FILE:
 	{
 		return "each file needs to have at most 1024 rules.";
+	}; break;
+	case ERR_BNF_IS_RECURSIVE:
+	{
+		return "every rule in a bnf has to lead to a non-terminal in the end.";
 	}; break;
 	}
 	return NULL;
@@ -790,5 +805,107 @@ void print_grammar_rules_list(grammar_rules_list_t *list)
 		grammar_rule_t *gt = &list->rules[i];
 		print_grammar_rule(gt);
 	}
+}
+
+/*
+
+typedef struct {
+	grammar_value_t values[MAX_GRAMMAR_UNIONS];
+	size_t len;
+} grammar_sequence_t;
+
+typedef struct grammar_rule_t {
+	string_view_t name;
+	grammar_sequence_t alternatives[MAX_GRAMMAR_UNIONS];
+	size_t alternatives_len;
+} grammar_rule_t;
+
+*/
+
+size_t find_index_in_grammar(grammar_rules_list_t *list, string_view_t non_atom)
+{
+	for (size_t i = 0; i < list->len; ++i)
+	{
+		grammar_rule_t *gr = &list->rules[i];
+		if (gr->name.len != non_atom.len)
+		{
+			continue;
+		}
+
+		if (gr->name.bytes == non_atom.bytes)
+		{
+			return i;
+		}
+
+		for (size_t j = 0; j < non_atom.len; ++j)
+		{
+			if (gr->name.bytes[j] != non_atom.bytes[j])
+			{
+				goto end;
+			}
+		}
+		return i;
+end:
+		continue;
+	}
+
+	return MAX_RULES_IN_FILE;
+} 
+
+uint8_t all_rules_lead_to_atoms(grammar_rules_list_t *list)
+{
+	// A rule R is productive if there exists at least one alternative such that every symbol in that alternative is either: 
+	// - a terminal (NUMERIC_ATOM), or
+	// - a nonterminal that is itself productive.
+
+	// O(n*n*n) fuck yea
+	uint8_t productive[MAX_RULES_IN_FILE] = {0};
+
+	uint8_t changed = 1;
+
+	while (changed)
+	{
+		changed = 0;
+		for (size_t i = 0; i < list->len; ++i)
+		{
+			if (productive[i])
+			{
+				continue;
+			}
+
+			grammar_rule_t *gr = &list->rules[i];
+
+			for (size_t j = 0; j < gr->alternatives_len; j++)
+			{
+				grammar_sequence_t *sq = &gr->alternatives[j];
+				uint8_t all_good = 1;
+				for (size_t k = 0; k < sq->len; k++)
+				{
+					grammar_value_t *value = &sq->values[k];
+					if (value->type == NUMERIC_ATOM)
+					{
+						continue;
+					}
+
+					size_t idx = find_index_in_grammar(list, value->as.non_atom);
+					assert(idx < MAX_RULES_IN_FILE);
+					if (!productive[idx])
+					{
+						all_good = 0;
+						break;
+					}
+				}
+
+				if (all_good)
+				{
+					productive[i] = 1;
+					changed = 1;
+					break;
+				}
+			}
+		}
+	}
+
+	return productive[0];
 }
 
