@@ -1,0 +1,2 @@
+binary := digit binary | digit
+digit := 0 | 1

@@ -5,6 +5,7 @@
 #include <string.h>
 #include <errno.h>
 #include <limits.h>
+#include <time.h>
 
 typedef struct {
 	char *bytes;
@@ -102,6 +103,7 @@ typedef struct {
 typedef struct {
 	grammar_value_t values[MAX_GRAMMAR_UNIONS];
 	size_t len;
+	uint8_t has_no_terminal;
 } grammar_sequence_t;
 
 typedef struct grammar_rule_t {
@@ -132,8 +134,16 @@ int32_t parser_parse(parser_t *parser, grammar_rules_list_t *out);
 
 uint8_t all_rules_lead_to_atoms(grammar_rules_list_t *rules);
 
+void fuzz_grammar(grammar_rules_list_t *rules);
+
+// TODO: play with different weight distributions
+void __compute_weight_with_terminal_bias(grammar_rule_t *rule, double *weights, size_t len, int depth);
+size_t weighted_random_select(double *weights, grammar_rule_t *rule);
+void expand_rule(string_view_t rule_name, grammar_rules_list_t *list, int current_depth);
+
 int main(int argc, const char **argv)
 {
+	srand(time(NULL));
 	command_t cmd = {0};
 	if (argc == 0)
 	{
@@ -213,7 +223,7 @@ int32_t cli_run(command_t *cmd)
 		return ERR_BNF_IS_RECURSIVE;
 	}
 
-	print_grammar_rules_list(&grammar_rules);
+	fuzz_grammar(&grammar_rules);
 
 	arena_free(&arena);
 	
@@ -679,6 +689,7 @@ int32_t parser_parse_grammar_rule(parser_t *parser, grammar_rule_t *grammar_rule
 		}
 		else
 		{
+			current_sequence->has_no_terminal = 1;
 			value->type = NON_ATOM;
 			value->as.non_atom = parser->curr_token.value;
 		}
@@ -807,21 +818,6 @@ void print_grammar_rules_list(grammar_rules_list_t *list)
 	}
 }
 
-/*
-
-typedef struct {
-	grammar_value_t values[MAX_GRAMMAR_UNIONS];
-	size_t len;
-} grammar_sequence_t;
-
-typedef struct grammar_rule_t {
-	string_view_t name;
-	grammar_sequence_t alternatives[MAX_GRAMMAR_UNIONS];
-	size_t alternatives_len;
-} grammar_rule_t;
-
-*/
-
 size_t find_index_in_grammar(grammar_rules_list_t *list, string_view_t non_atom)
 {
 	for (size_t i = 0; i < list->len; ++i)
@@ -857,8 +853,6 @@ uint8_t all_rules_lead_to_atoms(grammar_rules_list_t *list)
 	// A rule R is productive if there exists at least one alternative such that every symbol in that alternative is either: 
 	// - a terminal (NUMERIC_ATOM), or
 	// - a nonterminal that is itself productive.
-
-	// O(n*n*n) fuck yea
 	uint8_t productive[MAX_RULES_IN_FILE] = {0};
 
 	uint8_t changed = 1;
@@ -907,5 +901,88 @@ uint8_t all_rules_lead_to_atoms(grammar_rules_list_t *list)
 	}
 
 	return productive[0];
+}
+
+void expand_value(grammar_rules_list_t *list, grammar_value_t *value, int depth)
+{
+	if (value->type == NUMERIC_ATOM)
+	{
+		printf("%d", value->as.numeric_atom);
+	}
+	else if (value->type == NON_ATOM)
+	{
+		expand_rule(value->as.non_atom, list, depth + 1);
+	}
+}
+
+void expand_rule(string_view_t rule_name, grammar_rules_list_t *list, int current_depth)
+{
+	// TODO: Add max depth
+
+	size_t idx = find_index_in_grammar(list, rule_name);
+	assert(idx < MAX_RULES_IN_FILE);
+
+	grammar_rule_t *rule = &list->rules[idx];
+
+	double weights[MAX_GRAMMAR_UNIONS] = {0.0};
+	__compute_weight_with_terminal_bias(rule, weights, MAX_GRAMMAR_UNIONS, current_depth);
+
+	size_t selected_alt_idx = weighted_random_select(weights, rule);
+	assert(selected_alt_idx < MAX_RULES_IN_FILE);
+
+	grammar_sequence_t *seq = &rule->alternatives[selected_alt_idx];
+	for (size_t i = 0; i < seq->len; ++i)
+	{
+		grammar_value_t *value = &seq->values[i];
+		expand_value(list, value, current_depth);
+	}
+}
+
+size_t weighted_random_select(double *weights, grammar_rule_t *rule)
+{
+	double total_weight = 0.0;
+	for (size_t i = 0; i < rule->alternatives_len; i++)
+	{
+		total_weight += weights[i];
+	}
+
+	double random_value = ((double) rand() / RAND_MAX) * total_weight;
+	
+	double cumulative = 0.0;
+	for (size_t i = 0; i < rule->alternatives_len; ++i)
+	{
+		cumulative += weights[i];
+		if (random_value < cumulative)
+		{
+			return i;
+		}
+	}
+
+	return rule->alternatives_len-1;
+}
+
+void __compute_weight_with_terminal_bias(grammar_rule_t *rule, double *weights, size_t len, int depth)
+{
+	assert(rule->alternatives_len <= len);
+
+	for (size_t i = 0; i < rule->alternatives_len; ++i)
+	{
+		double base_weight = 1.0;
+		grammar_sequence_t *seq = &rule->alternatives[i];
+
+		if (seq->has_no_terminal)
+		{
+			weights[i] = (base_weight / (depth + 1));
+		}
+		else
+		{
+			weights[i] = base_weight * (depth + 1);
+		}
+	}
+}
+
+void fuzz_grammar(grammar_rules_list_t *list)
+{
+	expand_rule(list->rules[0].name, list, 0);
 }
 
