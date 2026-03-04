@@ -1,0 +1,6 @@
+stmt           := "if (" expression ")" stmt | expression ";" | "{\n" stmt "\n}" | "while (" expression ")\n" stmt 
+expression     := digits | "(" expression binoperation expression ")" | "(" unaryoperation expression ")" 
+digits         := numbers digits | numbers
+numbers        := 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9
+binoperation   := "<" | ">" | "<=" | ">=" | "=="
+unaryoperation := "!" | "-" | "+"

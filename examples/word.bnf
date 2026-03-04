@@ -1,0 +1,2 @@
+prefixword := "a" letter prefixword | "a" letter
+letter     := "a" | "b"

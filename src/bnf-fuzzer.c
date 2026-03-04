@@ -6,6 +6,8 @@
 #include <errno.h>
 #include <limits.h>
 #include <time.h>
+#include <sys/time.h>
+#include <unistd.h>
 
 typedef struct {
 	char *bytes;
@@ -54,6 +56,7 @@ char *cli_str_error(int32_t);
 #define ERR_INVALID_RULE_DEFINITION    110
 #define ERR_TOO_MANY_RULES_IN_FILE     111
 #define ERR_BNF_IS_RECURSIVE           112
+#define ERR_UNTERMINATED_STRING        113
 
 int32_t arena_new(arena_t *arena, size_t capacity);
 void arena_free(arena_t *arena);
@@ -72,6 +75,7 @@ typedef enum {
 	TOKEN_TYPE_IDENTIFIER,
 	TOKEN_TYPE_EQUAL_DEFINTION,
 	TOKEN_TYPE_NUMERIC_ATOM,
+	TOKEN_TYPE_STRING_ATOM,
 	TOKEN_TYPE_OR,
 	TOKEN_TYPE_NEWLINE,
 	TOKEN_TYPE_EOF,
@@ -90,12 +94,14 @@ lexer_t lexer_new(string_view_t sv);
 typedef enum {
 	NON_ATOM = 0,
 	NUMERIC_ATOM,
+	STRING_ATOM,
 } grammar_value_type_t;
 
 typedef struct {
 	grammar_value_type_t type;
 	union {
 		string_view_t non_atom;
+		string_view_t string_atom;
 		int32_t numeric_atom;
 	} as;
 } grammar_value_t;
@@ -143,7 +149,9 @@ void expand_rule(string_view_t rule_name, grammar_rules_list_t *list, int curren
 
 int main(int argc, const char **argv)
 {
-	srand(time(NULL));
+	struct timeval tv;
+	gettimeofday(&tv, NULL);
+	srand(tv.tv_sec * 1000000 + tv.tv_usec + getpid());
 	command_t cmd = {0};
 	if (argc == 0)
 	{
@@ -299,7 +307,7 @@ char *cli_str_error(int32_t err_code)
 	}; break;
 	case ERR_INVALID_TOKEN_TYPE_IN_RULE:
 	{
-		return "rule value can either be a numerical atom or a non atom identifier";
+		return "rule value can either be a numerical atom, string atom or a non atom identifier";
 	}; break;
 	case ERR_INVALID_RULE_DEFINITION:
 	{
@@ -312,6 +320,10 @@ char *cli_str_error(int32_t err_code)
 	case ERR_BNF_IS_RECURSIVE:
 	{
 		return "every rule in a bnf has to lead to a non-terminal in the end.";
+	}; break;
+	case ERR_UNTERMINATED_STRING:
+	{
+		return "string atom rule is not terminated.";
 	}; break;
 	}
 	return NULL;
@@ -528,6 +540,36 @@ string_view_t lexer_read_identifier(lexer_t *lexer)
 	return sv;
 }
 
+int32_t lexer_read_string(lexer_t *lexer, string_view_t *sv)
+{
+	// skip the starting "
+	lexer_read_char(lexer);
+
+	const char *p = lexer->input.bytes + lexer->position;
+
+	size_t len = 0;
+	while (lexer->ch != '\"')
+	{
+		len++;
+		lexer_read_char(lexer);
+	}
+
+	if (lexer->ch == 0)
+	{
+		if (lexer->read_position >= lexer->input.len)
+		{
+			return ERR_UNTERMINATED_STRING;
+		}
+	}
+
+	sv->len = len;
+	sv->bytes = p;
+
+	lexer_read_char(lexer);
+
+	return 0;
+}
+
 string_view_t lexer_read_number(lexer_t *lexer)
 {
 	const char *p = lexer->input.bytes + lexer->position;
@@ -567,6 +609,11 @@ int32_t lexer_next_token(lexer_t *lexer, token_t *token)
 		case 0:
 		{
 			token->type = TOKEN_TYPE_EOF;
+		}; break;
+		case '\"':
+		{
+			token->type = TOKEN_TYPE_STRING_ATOM;
+			return lexer_read_string(lexer, &token->value);
 		}; break;
 		default:
 		{
@@ -671,8 +718,9 @@ int32_t parser_parse_grammar_rule(parser_t *parser, grammar_rule_t *grammar_rule
 
 	while (!parser_current_token_is(parser, TOKEN_TYPE_NEWLINE))
 	{
-		if (!parser_current_token_is(parser, TOKEN_TYPE_NUMERIC_ATOM) && !parser_current_token_is(parser, TOKEN_TYPE_IDENTIFIER))
+		if (!parser_current_token_is(parser, TOKEN_TYPE_NUMERIC_ATOM) && !parser_current_token_is(parser, TOKEN_TYPE_IDENTIFIER) && !parser_current_token_is(parser, TOKEN_TYPE_STRING_ATOM))
 		{
+			printf("%d\n", parser->curr_token.type);
 			return ERR_INVALID_TOKEN_TYPE_IN_RULE;
 		}
 
@@ -686,6 +734,11 @@ int32_t parser_parse_grammar_rule(parser_t *parser, grammar_rule_t *grammar_rule
 		{
 			value->type = NUMERIC_ATOM;
 			value->as.numeric_atom = string_view_to_int_32_t(parser->curr_token.value);
+		}
+		else if (parser_current_token_is(parser, TOKEN_TYPE_STRING_ATOM))
+		{
+			value->type = STRING_ATOM;
+			value->as.string_atom = parser->curr_token.value;
 		}
 		else
 		{
@@ -703,7 +756,7 @@ int32_t parser_parse_grammar_rule(parser_t *parser, grammar_rule_t *grammar_rule
 
 		if (parser_current_token_is(parser, TOKEN_TYPE_OR))
 		{
-			if (!parser_peek_token_is(parser, TOKEN_TYPE_NUMERIC_ATOM) && !parser_peek_token_is(parser, TOKEN_TYPE_IDENTIFIER))
+			if (!parser_peek_token_is(parser, TOKEN_TYPE_NUMERIC_ATOM) && !parser_peek_token_is(parser, TOKEN_TYPE_STRING_ATOM) && !parser_peek_token_is(parser, TOKEN_TYPE_IDENTIFIER))
 			{
 				return ERR_INVALID_TOKEN_TYPE_IN_RULE;
 			}
@@ -773,6 +826,13 @@ void print_grammar_value(grammar_value_t *gv)
 		{
 			printf("%d", gv->as.numeric_atom);
 		}; break;
+		case STRING_ATOM:
+		{
+			for (size_t i = 0; i < gv->as.non_atom.len; ++i)
+			{
+				printf("%c", gv->as.string_atom.bytes[i]);
+			}
+		}; break;
 		case NON_ATOM:
 		{
 			for (size_t i = 0; i < gv->as.non_atom.len; ++i)
@@ -793,6 +853,7 @@ void print_grammar_sequence(grammar_sequence_t *seq)
 			printf(" ");
 		}
 	}
+	printf(" [has_no_terminal=%d]", seq->has_no_terminal);
 }
 
 void print_grammar_rule(grammar_rule_t *gr)
@@ -876,7 +937,7 @@ uint8_t all_rules_lead_to_atoms(grammar_rules_list_t *list)
 				for (size_t k = 0; k < sq->len; k++)
 				{
 					grammar_value_t *value = &sq->values[k];
-					if (value->type == NUMERIC_ATOM)
+					if (value->type == NUMERIC_ATOM || value->type == STRING_ATOM)
 					{
 						continue;
 					}
@@ -908,6 +969,13 @@ void expand_value(grammar_rules_list_t *list, grammar_value_t *value, int depth)
 	if (value->type == NUMERIC_ATOM)
 	{
 		printf("%d", value->as.numeric_atom);
+	}
+	else if (value->type == STRING_ATOM)
+	{
+		for (size_t i = 0; i < value->as.string_atom.len; ++i)
+		{
+			printf("%c", value->as.string_atom.bytes[i]);
+		}	
 	}
 	else if (value->type == NON_ATOM)
 	{
@@ -947,7 +1015,7 @@ size_t weighted_random_select(double *weights, grammar_rule_t *rule)
 	}
 
 	double random_value = ((double) rand() / RAND_MAX) * total_weight;
-	
+
 	double cumulative = 0.0;
 	for (size_t i = 0; i < rule->alternatives_len; ++i)
 	{
